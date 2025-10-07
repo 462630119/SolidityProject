@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.7;
 
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 // upgrade contract
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 
@@ -40,31 +41,14 @@ contract NFTAuction is Initializable, UUPSUpgradeable {
     uint256 public nextAuctionId;
     address public admin;
     uint256 public platformFee; // 平台手续费，单位为百分比（例如：2 表示 2%）
-    // constructor () {
-    //     admin = msg.sender;
-    // }
 
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "Only admin can perform this action");
-        _;
+    mapping(address => AggregatorV3Interface) public priceFeed;
+    function setPriceFeed(address token, address _priceFeed) public {
+        priceFeed[token] = AggregatorV3Interface(_priceFeed);
     }
-    AggregatorV3Interface internal priceFeed;
-    function setPriceETHFeed(address _priceFeed) public onlyAdmin {
-        priceFeed = AggregatorV3Interface(_priceFeed);
-    }
-    // function getLatestPrice() public returns (int256) {
-    //     (
-    //         uint80 roundID,
-    //         int256 price,
-    //         uint startedAt,
-    //         uint timeStamp,
-    //         uint80 answeredInRound
-    //     ) = priceFeed.latestRoundData();
-        
-    //     return price;
-    // }
 
-    function getChainlinkDataFeedLatestAnswer() public view returns (int) {
+    function getChainlinkDataFeedLatestAnswer(address token) public view returns (int) {
+        AggregatorV3Interface priceFeedItem = priceFeed[token];
         // prettier-ignore
         (
             /* uint80 roundId */,
@@ -72,13 +56,13 @@ contract NFTAuction is Initializable, UUPSUpgradeable {
             /*uint256 startedAt*/,
             /*uint256 updatedAt*/,
             /*uint80 answeredInRound*/
-        ) = priceFeed.latestRoundData();
+        ) = priceFeedItem.latestRoundData();
         return answer;
     }
 
     
     // 创建拍卖
-    function createAuction(uint256 _duration, uint256 _startPrice, address _nftAddress, uint256 _tokenId) public onlyAdmin {
+    function createAuction(uint256 _duration, uint256 _startPrice, address _nftAddress, uint256 _tokenId) public {
         require(_duration > 1000 * 60, "Duration must be greater than 1 minute");
         require(_startPrice > 0, "Start price must be greater than 0");
 
@@ -112,6 +96,24 @@ contract NFTAuction is Initializable, UUPSUpgradeable {
         require(!auction.ended && auction.startTime + auction.duration > block.timestamp, "Auction has ended");
         require(msg.value > auction.highestBid && msg.value >= auction.startPrice, "Bid must be higher than current highest bid");
 
+        if (tokenAddress != address(0)) {
+            uint ERC20Value = _amount * uint(getChainlinkDataFeedLatestAnswer(auction.tokenAddress));
+            uint startPriceValue = auction.startPrice * uint(getChainlinkDataFeedLatestAnswer(auction.tokenAddress));
+            uint highestBidValue = auction.highestBid * uint(getChainlinkDataFeedLatestAnswer(auction.tokenAddress));
+
+            require(ERC20Value > highestBidValue && ERC20Value >= startPriceValue, "Bid must be higher than current highest bid");
+            IERC20(tokenAddress).transferFrom(msg.sender, address(this), ERC20Value);
+            if (auction.highestBidder != address(0)) {
+                IERC20(tokenAddress).transfer(auction.highestBidder, highestBidValue);
+            } else {
+                // 退回 ERC20 代币
+                IERC20(auction.tokenAddress).transfer(auction.highestBidder, auction.highestBid);
+            }
+            auction.highestBidder = msg.sender;
+            auction.highestBid = ERC20Value;
+        }
+
+
         // Refund the previous highest bidder
         if (auction.highestBidder != address(0)) {
             payable(auction.highestBidder).transfer(auction.highestBid);
@@ -141,8 +143,8 @@ contract NFTAuction is Initializable, UUPSUpgradeable {
     
     }
 
-    function _authorizeUpgrade(address newImplementation) internal override onlyAdmin {
-        require(msg.sender == admin, "Only admin can upgrade the contract");
+    function _authorizeUpgrade(address newImplementation) internal override view{
+        require(msg.sender == admin, "only admin can upgrade");
     }
 
 }
